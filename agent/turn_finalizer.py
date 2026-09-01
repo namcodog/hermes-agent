@@ -31,6 +31,10 @@ from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import _sanitize_surrogates
+from agent.partial_result_delivery import (
+    format_internal_progress_footer,
+    is_internal_progress_only,
+)
 
 
 def _assistant_row_missing_visible_text(msg: dict) -> bool:
@@ -243,6 +247,18 @@ def _apply_pre_delivery_transforms(
                         )
         except Exception as exc:
             logger.debug("turn-completion explainer failed: %s", exc)
+
+    # A model can terminate normally while returning only its private progress
+    # status (for example, "research not complete; 9 steps remain").  That is
+    # not a delivery-worthy answer, but it is also not an excuse to run another
+    # tool loop or a second control gate.  Preserve the model text and append a
+    # bounded, factual recovery note assembled from the tool transcript.
+    if not interrupted and is_internal_progress_only(final_response):
+        final_response = (
+            final_response.rstrip()
+            + "\n\n"
+            + format_internal_progress_footer(messages)
+        )
 
     if final_response and not interrupted:
         try:
