@@ -306,8 +306,11 @@ _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT = (
 # marker for compaction recognizers (mirrors the continuation/todo markers).
 MAX_ITERATIONS_SUMMARY_REQUEST = (
     "You've reached the maximum number of tool-calling iterations allowed. "
-    "Please provide a final response summarizing what you've found and accomplished so far, "
-    "without calling any more tools."
+    "Without calling more tools, give the user a direct partial-result answer: "
+    "(1) confirmed findings so far, (2) evidence not obtained and the specific reason, "
+    "(3) how that gap limits the conclusion, and (4) the single best next step. "
+    "Never return only internal progress, step counts, or 'research incomplete'. "
+    "If no finding is verified, say that plainly and do not invent one."
 )
 _BACKGROUND_PROCESS_NOTIFICATION_PREFIX = "[IMPORTANT: Background process "
 
