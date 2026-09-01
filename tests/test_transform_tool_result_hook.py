@@ -87,6 +87,28 @@ def test_hook_receives_expected_kwargs(monkeypatch):
     assert captured["task_id"] == "t1"
     assert captured["session_id"] == "s1"
     assert captured["tool_call_id"] == "tc1"
+    assert captured["raw_result_receipt"] is None
+
+
+def test_large_result_receipt_is_available_before_projection(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        "tools.tool_result_storage.get_spillover_dir", lambda: tmp_path,
+    )
+
+    def _hook(hook_name, **kwargs):
+        if hook_name == "transform_tool_result":
+            captured.update(kwargs)
+            return ["compact"]
+        return []
+
+    out = _run_handle_function_call(
+        monkeypatch, dispatch_result="x" * 12_000, invoke_hook=_hook,
+    )
+    assert out == "compact"
+    receipt = captured["raw_result_receipt"]
+    assert receipt["raw_chars"] == 12_000
+    assert open(receipt["result_ref"], encoding="utf-8").read() == "x" * 12_000
 
 
 

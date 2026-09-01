@@ -67,6 +67,7 @@ HEREDOC_MARKER = "HERMES_PERSIST_EOF"
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 _UNSAFE_RESULT_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_RESULT_FILENAME_STEM = 120
+RAW_RESULT_PERSIST_THRESHOLD = 12_000
 
 _spillover_prune_lock = threading.Lock()
 _spillover_pruned_once = False
@@ -157,6 +158,58 @@ def _write_to_spillover(content: str, filename: str):
         return None
     _prune_spillover_once()
     return str(path)
+
+
+def preserve_raw_tool_result(
+    content: str,
+    tool_use_id: str,
+    *,
+    threshold: int = RAW_RESULT_PERSIST_THRESHOLD,
+    env=None,
+) -> dict[str, object] | None:
+    """Persist an unmodified large result before a plugin projects it.
+
+    Projection hooks are intentionally allowed to replace an in-context tool
+    result.  The original must therefore be written *before* those hooks run,
+    otherwise a compact view can accidentally become the only recoverable
+    representation.  This uses the existing host-owned spillover cache and
+    its normal TTL cleanup; it is not a second result store. A remote
+    environment receives only a reference it can actually read: the
+    cache-mounted path when available, otherwise an explicit sandbox copy.
+
+    The returned receipt is metadata only.  Callers pass it to a projection
+    hook, which may expose the existing ``read_file`` recovery route in its
+    compact view.  Failure is explicit (``None``), never replaced by a
+    fabricated reference.
+    """
+    if not isinstance(content, str) or len(content) < threshold:
+        return None
+    filename = _safe_result_filename(f"{tool_use_id or 'tool_result'}_raw")
+    path = _write_to_spillover(content, filename)
+    if path is None:
+        return None
+    readable_path = path
+    if not _is_host_side_env(env):
+        visible_path = _sandbox_visible_spillover_path(path, env)
+        if visible_path is not None:
+            readable_path = visible_path
+        else:
+            remote_path = f"{_resolve_storage_dir(env)}/{filename}"
+            try:
+                if not _write_to_sandbox(content, remote_path, env):
+                    return None
+            except Exception as exc:
+                logger.warning("Raw-result sandbox write failed for %s: %s", tool_use_id, exc)
+                return None
+            readable_path = remote_path
+    return {
+        "result_ref": readable_path,
+        "raw_chars": len(content),
+        "raw_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "detail_reader": {
+            "tool": "read_file", "path": readable_path, "offset": 0, "limit": 8_000,
+        },
+    }
 
 
 def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:

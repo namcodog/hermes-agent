@@ -295,6 +295,10 @@ def _order_for_recall(raw_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     )
 
 
+_MESSAGE_VIEW_CHARS = 4_000
+_MESSAGE_PAGE_MAX_CHARS = 8_000
+
+
 def _shape_message(
     m: Dict[str, Any],
     anchor_id: Optional[int] = None,
@@ -313,6 +317,7 @@ def _shape_message(
         from tools.ansi_strip import strip_ansi
 
         raw_content = strip_ansi(raw_content)
+    max_content_len = _MESSAGE_VIEW_CHARS if max_content_len is None else max_content_len
     if max_content_len and raw_content and len(raw_content) > max_content_len:
         content = raw_content[:max_content_len] + "…"
         truncated = True
@@ -480,6 +485,40 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
             "Pass around_message_id (any id above) to scroll the middle."
         )
     return json.dumps(response, ensure_ascii=False)
+
+
+def _read_message_page(
+    db, session_id: str, message_id: object, content_offset: object,
+    max_chars: object, link_profile: str = None,
+) -> str:
+    """Return one exact, bounded content page for a known message id."""
+    try:
+        message_id = int(message_id)
+        content_offset = max(0, int(content_offset or 0))
+        max_chars = int(max_chars or _MESSAGE_PAGE_MAX_CHARS)
+    except (TypeError, ValueError):
+        return tool_error("message_id, content_offset, and max_chars must be integers", success=False)
+    max_chars = max(1, min(max_chars, _MESSAGE_PAGE_MAX_CHARS))
+    try:
+        rows = db.get_messages(session_id)
+    except Exception as exc:
+        return tool_error(f"failed to load session: {exc}", success=False)
+    row = next((item for item in rows if item.get("id") == message_id), None)
+    if row is None:
+        return tool_error(f"message_id {message_id} not found in session_id {session_id}", success=False)
+    content = row.get("content") if isinstance(row.get("content"), str) else ""
+    if "\x1b" in content:
+        from tools.ansi_strip import strip_ansi
+        content = strip_ansi(content)
+    page = content[content_offset:content_offset + max_chars]
+    return json.dumps({
+        "success": True, "mode": "message_page", "session_id": session_id,
+        "link": _session_link(session_id, link_profile), "message_id": message_id,
+        "content_offset": content_offset, "content": page,
+        "returned_chars": len(page), "original_content_chars": len(content),
+        "has_more": content_offset + len(page) < len(content),
+        "next_content_offset": content_offset + len(page),
+    }, ensure_ascii=False)
 
 
 def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_profile: str = None) -> str:
@@ -960,6 +999,9 @@ def _session_search_impl(
     session_id: str = None,
     around_message_id: int = None,
     window: int = 5,
+    message_id: int = None,
+    content_offset: int = 0,
+    max_chars: int = _MESSAGE_PAGE_MAX_CHARS,
     # Discovery shape
     sort: str = None,
     # Cross-profile (any shape)
@@ -1005,6 +1047,14 @@ def _session_search_impl(
             if _owned_dbs is not None:
                 _owned_dbs.append(profile_db)
             current_session_id = None
+
+    # Exact message paging is the recovery route for content abbreviated by a
+    # regular read or scroll view.
+    if isinstance(session_id, str) and session_id.strip() and message_id is not None:
+        return _read_message_page(
+            db, session_id.strip(), message_id, content_offset, max_chars,
+            link_profile=profile,
+        )
 
     # Scroll shape takes precedence — explicit anchor beats any query.
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
@@ -1095,6 +1145,10 @@ def session_search(
     profile: str = None,
     # Discovery result shaping (appended to preserve positional compatibility)
     detail: str = "adaptive",
+    # Exact message-page shape (also appended for positional compatibility)
+    message_id: int = None,
+    content_offset: int = 0,
+    max_chars: int = _MESSAGE_PAGE_MAX_CHARS,
 ) -> str:
     """Run session search and close databases opened by this invocation."""
     owned_dbs: List[Any] = []
@@ -1120,6 +1174,9 @@ def session_search(
             session_id=session_id,
             around_message_id=around_message_id,
             window=window,
+            message_id=message_id,
+            content_offset=content_offset,
+            max_chars=max_chars,
             sort=sort,
             profile=profile,
             detail=detail,
@@ -1224,6 +1281,20 @@ SESSION_SEARCH_SCHEMA = {
                 ),
                 "default": 5,
             },
+            "message_id": {
+                "type": "integer",
+                "description": "Exact-page shape: with session_id, read one long message by its returned id.",
+            },
+            "content_offset": {
+                "type": "integer",
+                "description": "Exact-page shape: zero-based character offset; continue with next_content_offset.",
+                "default": 0,
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Exact-page shape: characters to return, clamped to 8000.",
+                "default": _MESSAGE_PAGE_MAX_CHARS,
+            },
             "role_filter": {
                 "type": "string",
                 "description": (
@@ -1262,6 +1333,9 @@ registry.register(
         session_id=args.get("session_id"),
         around_message_id=args.get("around_message_id"),
         window=args.get("window", 5),
+        message_id=args.get("message_id"),
+        content_offset=args.get("content_offset", 0),
+        max_chars=args.get("max_chars", _MESSAGE_PAGE_MAX_CHARS),
         sort=args.get("sort"),
         detail=args.get("detail", "adaptive"),
         profile=args.get("profile"),
